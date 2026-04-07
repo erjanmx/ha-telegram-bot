@@ -52,7 +52,7 @@ ha_headers = {
     "Authorization": f"Bearer {HA_TOKEN}",
     "Content-Type": "application/json",
 }
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 # Per-user conversation history: {user_id: [{"role": ..., "content": ...}]}
 conversation_history: dict[int, list[dict]] = {}
@@ -448,45 +448,55 @@ async def ask_claude(user_id: int, user_message: str) -> str:
     if len(history) > MAX_HISTORY:
         history[:] = history[-MAX_HISTORY:]
 
+    # Track how many entries we add so we can roll back on error
+    entries_added = 1  # the user message above
+
     max_iterations = 10
-    for _ in range(max_iterations):
-        response = anthropic_client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,  # type: ignore[arg-type]
-            messages=history,
-        )
+    try:
+        for _ in range(max_iterations):
+            response = await anthropic_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=4096,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,  # type: ignore[arg-type]
+                messages=history,
+            )
 
-        # Collect all content blocks
-        assistant_content = response.content
-        history.append({"role": "assistant", "content": assistant_content})
+            # Collect all content blocks
+            assistant_content = response.content
+            history.append({"role": "assistant", "content": assistant_content})
+            entries_added += 1
 
-        if response.stop_reason == "end_turn":
-            # Extract text
-            text_parts = [b.text for b in assistant_content if b.type == "text"]
-            return "\n".join(text_parts) or "(no response)"
+            if response.stop_reason == "end_turn":
+                text_parts = [b.text for b in assistant_content if b.type == "text"]
+                return "\n".join(text_parts) or "(no response)"
 
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            for block in assistant_content:
-                if block.type != "tool_use":
-                    continue
-                log.info("Tool call: %s(%s)", block.name, block.input)
-                result = await execute_tool(block.name, block.input)
-                log.info("Tool result: %s…", result[:200])
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    }
-                )
-            history.append({"role": "user", "content": tool_results})
-            continue
+            if response.stop_reason == "tool_use":
+                tool_results = []
+                for block in assistant_content:
+                    if block.type != "tool_use":
+                        continue
+                    log.info("Tool call: %s(%s)", block.name, block.input)
+                    result = await execute_tool(block.name, block.input)
+                    log.info("Tool result: %s…", result[:200])
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        }
+                    )
+                history.append({"role": "user", "content": tool_results})
+                entries_added += 1
+                continue
 
-        # Unexpected stop reason
-        break
+            # Unexpected stop reason
+            break
+
+    except Exception:
+        # Roll back history to avoid corrupted state (orphaned tool_use blocks)
+        del history[-entries_added:]
+        raise
 
     return "Sorry, I hit the maximum number of steps. Please try a simpler request."
 
@@ -555,7 +565,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
     )
 
-    reply = await ask_claude(user.id, text)
+    try:
+        reply = await ask_claude(user.id, text)
+    except anthropic.RateLimitError:
+        await update.message.reply_text(
+            "Rate limit reached — please wait a moment and try again."
+        )
+        return
+    except anthropic.BadRequestError as e:
+        log.error("Anthropic bad request (history cleared): %s", e)
+        conversation_history.pop(user.id, None)
+        await update.message.reply_text(
+            "Something went wrong with the conversation state — I've reset it. Please try again."
+        )
+        return
+    except Exception as e:
+        log.exception("Unexpected error in ask_claude")
+        await update.message.reply_text(f"Unexpected error: {e}")
+        return
 
     # Telegram max message length is 4096; split if needed
     for chunk in _split_message(reply):
