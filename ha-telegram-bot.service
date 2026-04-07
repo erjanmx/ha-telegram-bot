@@ -1,0 +1,28 @@
+[Unit]
+Description=Home Assistant Telegram Bot (Claude AI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=habot
+WorkingDirectory=/opt/ha-telegram-bot
+EnvironmentFile=/opt/ha-telegram-bot/.env
+
+# Use the virtualenv interpreter
+ExecStart=/opt/ha-telegram-bot/venv/bin/python bot.py
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ha-telegram-bot
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ha-telegram-bot
+
+[Install]
+WantedBy=multi-user.target
