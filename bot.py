@@ -422,10 +422,14 @@ async def execute_tool(name: str, inputs: dict) -> str:
 # Claude agentic loop
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_TEMPLATE = """\
 You are a helpful Home Assistant controller. You have access to the user's \
 Home Assistant instance via a set of tools. Use them to read states, control \
 devices, inspect history, and manage automations.
+
+## Timezone
+The user's local timezone is {timezone}. Always express dates and times in \
+this timezone. Never use UTC unless explicitly asked.
 
 ## Token efficiency — IMPORTANT
 You are running under a strict API token budget. Violating these rules causes \
@@ -451,8 +455,10 @@ rate limit errors that break the bot:
 - For OAuth flows: show the auth URL as a clickable link and tell the user to \
   complete it in their browser.
 - Keep replies concise. Use bullet points for entity lists.
-- Use UTC for times and say so if the user's timezone is unknown.
 """
+
+# Resolved at startup after fetching HA config
+SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(timezone="UTC")
 
 
 async def ask_claude(user_id: int, user_message: str) -> str:
@@ -619,8 +625,27 @@ def _split_message(text: str, limit: int = 4096) -> list[str]:
 # Main
 # ---------------------------------------------------------------------------
 
+async def fetch_ha_timezone() -> str:
+    try:
+        config = await ha_get("/api/config")
+        tz = config.get("time_zone", "UTC")
+        log.info("HA timezone: %s", tz)
+        return tz
+    except Exception as e:
+        log.warning("Could not fetch HA timezone, defaulting to UTC: %s", e)
+        return "UTC"
+
+
 def main() -> None:
+    import asyncio
+
+    global SYSTEM_PROMPT
+
     log.info("Starting ha-telegram-bot (model=%s)", CLAUDE_MODEL)
+
+    # Fetch timezone synchronously before the bot loop starts
+    tz = asyncio.run(fetch_ha_timezone())
+    SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(timezone=tz)
 
     request = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30)
     app = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
