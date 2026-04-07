@@ -18,6 +18,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 
 load_dotenv()
 
@@ -578,7 +579,8 @@ def _split_message(text: str, limit: int = 4096) -> list[str]:
 def main() -> None:
     log.info("Starting ha-telegram-bot (model=%s)", CLAUDE_MODEL)
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    request = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30)
+    app = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("help", cmd_help))
